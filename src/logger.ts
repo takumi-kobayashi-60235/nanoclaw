@@ -60,6 +60,10 @@ function log(
 }
 
 export const logger = {
+  level: (process.env.LOG_LEVEL as Level) || 'info',
+  child: () => logger,
+  trace: (dataOrMsg: Record<string, unknown> | string, msg?: string) =>
+    log('debug', dataOrMsg, msg),
   debug: (dataOrMsg: Record<string, unknown> | string, msg?: string) =>
     log('debug', dataOrMsg, msg),
   info: (dataOrMsg: Record<string, unknown> | string, msg?: string) =>
