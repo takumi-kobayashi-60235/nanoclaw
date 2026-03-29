@@ -17,7 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
 interface ContainerInput {
@@ -141,14 +141,25 @@ function getSessionSummary(sessionId: string, transcriptPath: string): string | 
   return null;
 }
 
+interface ArchiveHookInput {
+  transcript_path?: string;
+  session_id: string;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
- * Archive the full transcript to conversations/ before compaction.
+ * Archive the full transcript to conversations/.
+ * Run on Stop / SessionEnd as well as PreCompact so the conversation markdown
+ * stays current even when compaction never happens.
  */
-function createPreCompactHook(assistantName?: string): HookCallback {
+function createArchiveHook(assistantName?: string, delayMs = 0): HookCallback {
   return async (input, _toolUseId, _context) => {
-    const preCompact = input as PreCompactHookInput;
-    const transcriptPath = preCompact.transcript_path;
-    const sessionId = preCompact.session_id;
+    const hookInput = input as ArchiveHookInput;
+    const transcriptPath = hookInput.transcript_path;
+    const sessionId = hookInput.session_id;
 
     if (!transcriptPath || !fs.existsSync(transcriptPath)) {
       log('No transcript found for archiving');
@@ -156,6 +167,10 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     }
 
     try {
+      if (delayMs > 0) {
+        await sleep(delayMs);
+      }
+
       const content = fs.readFileSync(transcriptPath, 'utf-8');
       const messages = parseTranscript(content);
 
@@ -199,9 +214,41 @@ function generateFallbackName(): string {
   return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
 }
 
+type ParsedMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result';
+
 interface ParsedMessage {
-  role: 'user' | 'assistant';
+  type: ParsedMessageType;
   content: string;
+  toolName?: string;
+  isError?: boolean;
+}
+
+function stringifyTranscriptContent(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map(item => stringifyTranscriptContent(item))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  if (value && typeof value === 'object') {
+    return JSON.stringify(value, null, 2);
+  }
+
+  return '';
+}
+
+function formatToolUseContent(name: string, input: unknown): string {
+  if (name === 'Bash' && input && typeof input === 'object' && 'command' in input) {
+    const command = typeof input.command === 'string' ? input.command : '';
+    if (command) return command;
+  }
+
+  return stringifyTranscriptContent(input);
 }
 
 function parseTranscript(content: string): ParsedMessage[] {
@@ -212,16 +259,50 @@ function parseTranscript(content: string): ParsedMessage[] {
     try {
       const entry = JSON.parse(line);
       if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string'
-          ? entry.message.content
-          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
-        if (text) messages.push({ role: 'user', content: text });
+        if (typeof entry.message.content === 'string') {
+          if (entry.message.content) {
+            messages.push({ type: 'user', content: entry.message.content });
+          }
+        } else if (Array.isArray(entry.message.content)) {
+          for (const part of entry.message.content) {
+            if (part?.type === 'tool_result') {
+              const toolResult = stringifyTranscriptContent(part.content);
+              if (toolResult) {
+                messages.push({
+                  type: 'tool_result',
+                  content: toolResult,
+                  isError: Boolean(part.is_error),
+                });
+              }
+            } else {
+              const text = typeof part?.text === 'string' ? part.text : '';
+              if (text) messages.push({ type: 'user', content: text });
+            }
+          }
+        }
       } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content
-          .filter((c: { type: string }) => c.type === 'text')
-          .map((c: { text: string }) => c.text);
-        const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
+        if (typeof entry.message.content === 'string') {
+          if (entry.message.content) {
+            messages.push({ type: 'assistant', content: entry.message.content });
+          }
+        } else if (Array.isArray(entry.message.content)) {
+          for (const part of entry.message.content) {
+            if (part?.type === 'text') {
+              const text = typeof part.text === 'string' ? part.text : '';
+              if (text) messages.push({ type: 'assistant', content: text });
+            } else if (part?.type === 'tool_use') {
+              const toolName = typeof part.name === 'string' ? part.name : 'Tool';
+              const toolInput = formatToolUseContent(toolName, part.input);
+              if (toolInput) {
+                messages.push({
+                  type: 'tool_use',
+                  toolName,
+                  content: toolInput,
+                });
+              }
+            }
+          }
+        }
       }
     } catch {
     }
@@ -249,11 +330,35 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   lines.push('');
 
   for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : (assistantName || 'Assistant');
     const content = msg.content.length > 2000
       ? msg.content.slice(0, 2000) + '...'
       : msg.content;
-    lines.push(`**${sender}**: ${content}`);
+
+    if (msg.type === 'user') {
+      lines.push(`**User**: ${content}`);
+      lines.push('');
+      continue;
+    }
+
+    if (msg.type === 'assistant') {
+      lines.push(`**${assistantName || 'Assistant'}**: ${content}`);
+      lines.push('');
+      continue;
+    }
+
+    if (msg.type === 'tool_use') {
+      lines.push(`**${assistantName || 'Assistant'} Tool Use**: \`${msg.toolName || 'Tool'}\``);
+      lines.push('```text');
+      lines.push(content);
+      lines.push('```');
+      lines.push('');
+      continue;
+    }
+
+    lines.push(`**Tool Result${msg.isError ? ' (error)' : ''}**:`);
+    lines.push('```text');
+    lines.push(content);
+    lines.push('```');
     lines.push('');
   }
 
@@ -427,7 +532,9 @@ async function runQuery(
         },
       },
       hooks: {
-        PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreCompact: [{ hooks: [createArchiveHook(containerInput.assistantName)] }],
+        Stop: [{ hooks: [createArchiveHook(containerInput.assistantName, 10_000)] }],
+        SessionEnd: [{ hooks: [createArchiveHook(containerInput.assistantName, 10_000)] }],
       },
     }
   })) {
