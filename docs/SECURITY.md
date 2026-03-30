@@ -39,6 +39,7 @@ private_key, .secret
 - Symlink resolution before validation (prevents traversal attacks)
 - Container path validation (rejects `..` and absolute paths)
 - `nonMainReadOnly` option forces read-only for non-main groups
+- Additional mounts always appear under `/workspace/extra/<containerPath>` inside the container
 
 **Read-Only Project Root:**
 
