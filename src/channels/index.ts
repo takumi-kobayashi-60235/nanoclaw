@@ -8,6 +8,9 @@
 // slack
 import './slack.js';
 
+// signal
+import './signal.js';
+
 // telegram
 
 // whatsapp

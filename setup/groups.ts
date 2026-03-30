@@ -51,7 +51,7 @@ async function listGroups(limit: number): Promise<void> {
   const rows = db
     .prepare(
       `SELECT jid, name FROM chats
-     WHERE jid LIKE '%@g.us' AND jid <> '__group_sync__' AND name <> jid
+     WHERE is_group = 1 AND jid <> '__group_sync__' AND name <> jid
      ORDER BY last_message_time DESC
      LIMIT ?`,
     )
