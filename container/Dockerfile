@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
@@ -35,6 +36,10 @@ RUN npm install -g agent-browser @anthropic-ai/claude-code
 
 # Create app directory
 WORKDIR /app
+
+# Install helper web tools for non-Anthropic-compatible backends
+COPY bin/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/web-search /usr/local/bin/web-fetch /usr/local/bin/weather-now /usr/local/bin/WebSearch /usr/local/bin/WebFetch
 
 # Copy package files first for better caching
 COPY agent-runner/package*.json ./

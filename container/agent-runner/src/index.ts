@@ -223,6 +223,13 @@ interface ParsedMessage {
   isError?: boolean;
 }
 
+interface ToolTraceEntry {
+  toolName: string;
+  input: string;
+  result?: string;
+  isError?: boolean;
+}
+
 function stringifyTranscriptContent(value: unknown): string {
   if (typeof value === 'string') {
     return value;
@@ -249,6 +256,128 @@ function formatToolUseContent(name: string, input: unknown): string {
   }
 
   return stringifyTranscriptContent(input);
+}
+
+function extractToolTraceEvents(message: unknown): ParsedMessage[] {
+  if (!message || typeof message !== 'object') return [];
+
+  const entry = message as {
+    type?: string;
+    message?: { content?: unknown };
+  };
+
+  if (!Array.isArray(entry.message?.content)) return [];
+
+  const events: ParsedMessage[] = [];
+
+  if (entry.type === 'assistant') {
+    for (const part of entry.message.content) {
+      if (part && typeof part === 'object' && 'type' in part && (part as { type?: string }).type === 'tool_use') {
+        const toolPart = part as { name?: string; input?: unknown };
+        const toolName = typeof toolPart.name === 'string' ? toolPart.name : 'Tool';
+        const toolInput = formatToolUseContent(toolName, toolPart.input);
+        events.push({
+          type: 'tool_use',
+          toolName,
+          content: toolInput,
+        });
+      }
+    }
+    return events;
+  }
+
+  if (entry.type === 'user') {
+    for (const part of entry.message.content) {
+      if (part && typeof part === 'object' && 'type' in part && (part as { type?: string }).type === 'tool_result') {
+        const resultPart = part as { content?: unknown; is_error?: boolean };
+        const toolResult = stringifyTranscriptContent(resultPart.content);
+        events.push({
+          type: 'tool_result',
+          content: toolResult,
+          isError: Boolean(resultPart.is_error),
+        });
+      }
+    }
+  }
+
+  return events;
+}
+
+function summarizeTraceText(value: string, maxLength = 160): string {
+  const collapsed = value
+    .replace(/\s+/g, ' ')
+    .replace(/```/g, '')
+    .trim();
+  if (!collapsed) return '(empty)';
+  return collapsed.length > maxLength ? `${collapsed.slice(0, maxLength - 3)}...` : collapsed;
+}
+
+function collapseRepeatedLines(lines: string[]): string[] {
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+
+  for (const line of lines) {
+    if (!counts.has(line)) {
+      order.push(line);
+    }
+    counts.set(line, (counts.get(line) || 0) + 1);
+  }
+
+  return order.map(line => {
+    const count = counts.get(line) || 0;
+    return count > 1 ? `${line} (x${count})` : line;
+  });
+}
+
+function resultLooksInvestigativelyIncomplete(result: string | null): boolean {
+  if (!result) return false;
+  if (/What I checked:|What failed:|What to try next:/i.test(result)) return false;
+
+  return /申し訳ありません|できません|取得できません|確認できません|見つけられません|わかりません|分かりません|不明です|unable to|could not|couldn't|cannot|can't|failed to/i.test(result);
+}
+
+function formatToolTraceAppendix(
+  toolTrace: ToolTraceEntry[],
+  includeFailures: boolean,
+): string {
+  const recent = toolTrace.slice(-6);
+  if (recent.length === 0) return '';
+
+  const checkedLines = recent.map(entry =>
+    `- ${entry.toolName}: ${summarizeTraceText(entry.input || '(no input)')}`,
+  );
+
+  const failedLines = recent
+    .filter(entry => entry.isError || !entry.result || /error|failed|404|500|timeout|timed out|not found|unauthorized/i.test(entry.result))
+    .map(entry =>
+      `- ${entry.toolName}: ${summarizeTraceText(entry.result || '(no result)')}`,
+    );
+
+  const lines = ['', 'What I checked:'];
+  lines.push(...collapseRepeatedLines(checkedLines));
+
+  if (includeFailures && failedLines.length > 0) {
+    lines.push('', 'What failed:');
+    lines.push(...collapseRepeatedLines(failedLines));
+  }
+
+  return lines.join('\n');
+}
+
+function maybeAppendToolTrace(
+  result: string | null,
+  toolTrace: ToolTraceEntry[],
+): string | null {
+  if (result === null) return result;
+  if (/What I checked:|What failed:|What to try next:/i.test(result)) return result;
+
+  const appendix = formatToolTraceAppendix(
+    toolTrace,
+    resultLooksInvestigativelyIncomplete(result),
+  );
+  if (!appendix) return result;
+
+  return `${result.trimEnd()}\n${appendix}`;
 }
 
 function parseTranscript(content: string): ParsedMessage[] {
@@ -472,6 +601,7 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  const toolTrace: ToolTraceEntry[] = [];
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -506,16 +636,24 @@ async function runQuery(
       systemPrompt: globalClaudeMd
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
         : undefined,
+      tools: [
+        'Bash',
+        'Read', 'Write', 'Edit', 'Glob',
+        'Task', 'TaskOutput', 'TaskStop',
+        'TeamCreate', 'TeamDelete', 'SendMessage',
+        'TodoWrite', 'ToolSearch', 'Skill',
+        'NotebookEdit',
+      ],
       allowedTools: [
         'Bash',
-        'Read', 'Write', 'Edit', 'Glob', 'Grep',
-        'WebSearch', 'WebFetch',
+        'Read', 'Write', 'Edit', 'Glob',
         'Task', 'TaskOutput', 'TaskStop',
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*'
       ],
+      disallowedTools: ['WebSearch', 'WebFetch', 'Grep'],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -556,9 +694,26 @@ async function runQuery(
       log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
     }
 
+    for (const event of extractToolTraceEvents(message)) {
+      if (event.type === 'tool_use') {
+        toolTrace.push({
+          toolName: event.toolName || 'Tool',
+          input: event.content,
+        });
+        continue;
+      }
+
+      const pendingEntry = [...toolTrace].reverse().find(entry => entry.result === undefined);
+      if (pendingEntry) {
+        pendingEntry.result = event.content;
+        pendingEntry.isError = event.isError;
+      }
+    }
+
     if (message.type === 'result') {
       resultCount++;
-      const textResult = 'result' in message ? (message as { result?: string }).result : null;
+      const rawTextResult = 'result' in message ? (message as { result?: string }).result : null;
+      const textResult = maybeAppendToolTrace(rawTextResult || null, toolTrace);
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
       writeOutput({
         status: 'success',

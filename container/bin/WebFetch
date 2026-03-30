@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+import json
+import re
+import subprocess
+import sys
+
+
+def usage() -> int:
+    print('Usage: WebFetch URL | WebFetch \'{"url":"..."}\'', file=sys.stderr)
+    return 2
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        return usage()
+
+    url: str | None = None
+    raw_joined = " ".join(args).strip()
+
+    if raw_joined.startswith("{"):
+        try:
+            payload = json.loads(raw_joined)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("url"), str):
+            url = payload["url"].strip()
+
+    if url is None and raw_joined.startswith("{"):
+        match = re.search(r'url\s*[:=]\s*"?([^"}]+)"?', raw_joined)
+        if match:
+            url = match.group(1).strip()
+
+    if url is None and len(args) == 1:
+        raw = args[0].strip()
+        if raw.startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("url"), str):
+                url = payload["url"].strip()
+
+    if url is None:
+        url = args[0].strip()
+
+    if not url:
+        return usage()
+
+    proc = subprocess.run(
+        ["web-fetch", url],
+        check=False,
+    )
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -47,8 +47,9 @@ ls /workspace/ipc/ 2>/dev/null
 
 Confirm which tool families are available to you:
 
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
+- **Core:** Bash, Read, Write, Edit, Glob
+- **Web via Bash:** `web-search`, `web-fetch`, `weather-now`
+- **Search via Bash:** `rg`, `find`
 - **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
 - **MCP:** mcp__nanoclaw__* (send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group)
 

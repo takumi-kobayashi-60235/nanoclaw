@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+import json
+import re
+import subprocess
+import sys
+
+
+def usage() -> int:
+    print('Usage: WebSearch QUERY | WebSearch \'{"query":"..."}\'', file=sys.stderr)
+    return 2
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args:
+        return usage()
+
+    query: str | None = None
+    raw_joined = " ".join(args).strip()
+
+    if raw_joined.startswith("{"):
+        try:
+            payload = json.loads(raw_joined)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("query"), str):
+            query = payload["query"].strip()
+
+    if query is None and raw_joined.startswith("{"):
+        match = re.search(r'query\s*[:=]\s*"?([^"}]+)"?', raw_joined)
+        if match:
+            query = match.group(1).strip()
+
+    if query is None and len(args) == 1:
+        raw = args[0].strip()
+        if raw.startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("query"), str):
+                query = payload["query"].strip()
+
+    if query is None:
+        query = raw_joined
+
+    if not query:
+        return usage()
+
+    proc = subprocess.run(
+        ["web-search", query],
+        check=False,
+    )
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
