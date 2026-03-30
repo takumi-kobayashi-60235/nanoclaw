@@ -126,7 +126,9 @@ async function execSignalCli(
       { maxBuffer: 10 * 1024 * 1024 },
       (error, childStdout, childStderr) => {
         if (error) {
-          const detail = [childStderr, childStdout, error.message].find(Boolean);
+          const detail = [childStderr, childStdout, error.message].find(
+            Boolean,
+          );
           reject(new Error(`signal-cli ${args.join(' ')} failed: ${detail}`));
           return;
         }
@@ -360,7 +362,10 @@ export class SignalChannel implements Channel {
       : envelope.sourceNumber || envelope.source || 'unknown';
     const senderName = isFromMe
       ? 'You'
-      : envelope.sourceName || envelope.sourceNumber || envelope.source || 'unknown';
+      : envelope.sourceName ||
+        envelope.sourceNumber ||
+        envelope.source ||
+        'unknown';
 
     return {
       id: `${chatJid}:${rawTimestamp}`,
